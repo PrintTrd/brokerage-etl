@@ -1,0 +1,72 @@
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: myuser
+      POSTGRES_PASSWORD: db_pass_2026
+      POSTGRES_DB: brokerage_data
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d brokerage_data"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── ETL (on-demand run) ───────────────────────────────────────────────────
+  etl:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://myuser:db_pass_2026@db:5432/brokerage_data}
+      INPUT_DIR: ${INPUT_DIR:-/app/data/input}
+      TRADE_FILE_GLOB: ${TRADE_FILE_GLOB:-trades_*.csv}
+      VALID_SIDES: ${VALID_SIDES:-BUY,SELL}
+    volumes:
+      - ./data/input:/app/data/input:ro
+    # Exits 0 after completing — restart: "no" is intentional for on-demand use
+    restart: "no"
+
+  # ── Scheduler (periodic runs, every 5 minutes) ────────────────────────────
+  # Drop a new trades_YYYY-MM-DD.csv into data/input/ and the scheduler will
+  # pick it up on the next tick without any manual intervention.
+  scheduler:
+    image: alpine:3.19
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data/input:/app/data/input:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Uses `docker run` against the already-built etl image so we do not
+    # duplicate orchestration logic inside the container.
+    # Change `*/5` to any cron expression you need.
+    command: >
+      sh -c "
+        apk add --no-cache docker-cli &&
+        echo '*/5 * * * * docker compose -f /app/docker-compose.yml run --rm etl >> /var/log/etl-cron.log 2>&1' | crontab - &&
+        crond -f -l 2
+      "
+    restart: unless-stopped
+
+  # ── pgAdmin (optional, visual query tool) ────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: brokerage_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@local.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
