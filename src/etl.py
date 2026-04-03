@@ -392,6 +392,17 @@ def run(engine) -> None:
         upsert_trades(clean_df, engine)
         insert_rejected(rejected_df, engine)
 
+        # Summary stats per file
+        total_raw = len(raw_df)
+        total_clean = len(clean_df)
+        total_rejected = len(rejected_df)
+        completion_rate = (total_clean / total_raw * 100) if total_raw else 0.0
+        log.info("--- Final Stats for %s ---", source_file)
+        log.info(
+            "Raw: %d | Clean: %d | Rejected: %d", total_raw, total_clean, total_rejected
+        )
+        log.info("Completion Rate: %.2f%%", completion_rate)
+
     log.info("Pipeline complete.")
 
 

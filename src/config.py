@@ -12,8 +12,8 @@ class Settings:
         self.DB_NAME = os.getenv("POSTGRES_DB", "brokerage_data")
         self.DATABASE_URL = f"postgresql://{self.DB_USER}:{self.DB_PASS}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
         # Retry Logic for Connection Failure (seconds)
-        self.MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))
-        self.RETRY_DELAY = int(os.getenv("RETRY_DELAY", 3))
+        self.MAX_RETRIES = 5
+        self.RETRY_DELAY = 3
 
         # ── 2. Business Logic & App Config ──
         # Dynamic path handling (supports both Docker '/app' and Local Windows/Linux)
