@@ -12,5 +12,4 @@ COPY src/ ./src/
 # Data directory is mounted at runtime via docker-compose volume
 # so we only create the mount point here
 RUN mkdir -p /app/data/input
-
-CMD ["python", "src/etl.py"]
+CMD ["python", "-m", "src.etl"]
