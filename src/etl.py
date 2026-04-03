@@ -147,7 +147,7 @@ def clean_trades(
     # Each rule adds a nullable String column: value = reason text | null.
     # Rows with at least one non-null reason column are rejected.
     # concat_str(..., ignore_nulls=True) joins all fired reasons into one
-    # human-readable string ("invalid_side; unknown_client_id", etc.).
+    # human-readable string ("invalid_side; unknown_client_id", etc.)
 
     _REASON_COLS = ["_r_side", "_r_price", "_r_qty", "_r_client", "_r_instr"]
 
@@ -335,6 +335,13 @@ def insert_rejected(df: pl.DataFrame, engine) -> None:
     log.info("Logged %d rejected rows to 'rejected_trades'.", len(df))
 
 
+def get_processed_files(engine) -> set:
+    """Get already processed files by checking distinct source_file values in the trades table."""
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT DISTINCT source_file FROM trades"))
+        return {row[0] for row in result}
+
+
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 def run(engine) -> None:
     # ── Step 1: Schema ────────────────────────────────────────────────────
@@ -362,15 +369,20 @@ def run(engine) -> None:
 
     # ── Step 3: Discover and process all trade files ──────────────────────
     trade_files = sorted(glob.glob(str(settings.INPUT_DIR / settings.TRADE_FILE_GLOB)))
-    if not trade_files:
-        log.warning(
-            "No trade files matching '%s' found in %s",
-            settings.TRADE_FILE_GLOB,
-            settings.INPUT_DIR,
-        )
+
+    # Filter out already processed files ────────────────────────────
+    processed = get_processed_files(engine)
+    new_files = [f for f in trade_files if Path(f).name not in processed]
+
+    if not new_files:
+        log.info("No new trade files to process.")
         return
 
-    for path in trade_files:
+    log.info(
+        "Found %d new file(s): %s", len(new_files), [Path(f).name for f in new_files]
+    )
+
+    for path in new_files:
         source_file = Path(path).name
         log.info("Processing trade file: %s", source_file)
         raw_df = pl.read_csv(path, **settings.CSV_OPTS)
