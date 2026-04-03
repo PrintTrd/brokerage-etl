@@ -2,13 +2,16 @@ services:
   # ── PostgreSQL ────────────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
+    container_name: db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-myuser}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_local_only}
       POSTGRES_DB: ${POSTGRES_DB:-brokerage_data}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Waits for PostgreSQL to be ready before starting dependent services
@@ -16,11 +19,14 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 3
+    networks:
+      - etl_network
 
   # ── ETL (on-demand run) ───────────────────────────────────────────────────
   etl:
     build: .
+    container_name: etl
     depends_on:
       db:
         condition: service_healthy
@@ -30,33 +36,38 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-brokerage_data}
       POSTGRES_HOST: ${POSTGRES_HOST:-db}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+    networks:
+      - etl_network
     volumes:
-      - ./data/input:/app/data/input:ro
+      - ${HOST_PWD}/data/input:/app/data/input:ro #Read-Only
     # Exits 0 after completing — restart: "no" is intentional for on-demand use
     restart: "no"
 
-  # ── Scheduler (periodic runs, every 5 minutes) ────────────────────────────
+  # ── Scheduler (periodic runs, every 2 minutes) ────────────────────────────
   # Drop a new trades_YYYY-MM-DD.csv into data/input/ and the scheduler will
   # pick it up on the next tick without any manual intervention.
   scheduler:
     image: alpine:3.19
+    container_name: scheduler
     depends_on:
       db:
         condition: service_healthy
+    links:
+      - db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-myuser}
+      POSTGRES_DB: ${POSTGRES_DB:-brokerage_data}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      DB_MAX_RETRIES: 3
+      DB_RETRY_DELAY: 5
+    networks:
+      - etl_network
     volumes:
-      - ./data/input:/app/data/input:ro #Read-Only
+      - ${HOST_PWD}/data/input:/app/data/input:ro #Read-Only
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./:/app
-    # Uses `docker run` against the already-built etl image so we do not
-    # duplicate orchestration logic inside the container.
-    # crond is Daemon (Background Process) that runs the scheduled tasks,
-    # and keep it in foreground mode with `-f` to prevent the container from exiting.
-    command: >
-      sh -c "
-        apk add --no-cache docker-cli &&
-        echo '*/5 * * * * docker compose -f /app/docker-compose.yml run --rm etl >> /var/log/etl-cron.log 2>&1' | crontab - &&
-        crond -f -l 2
-      "
+      - ${HOST_PWD}:/app
+    command: sh /app/scheduler.sh
     restart: unless-stopped
 
   # ── pgAdmin (optional, visual query tool) ────────────────────────────────
@@ -74,3 +85,8 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  etl_network:
+    name: shared_etl_network
+    driver: bridge
