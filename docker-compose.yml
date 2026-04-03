@@ -4,15 +4,16 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: myuser
-      POSTGRES_PASSWORD: db_pass_2026
-      POSTGRES_DB: brokerage_data
+      POSTGRES_USER: ${POSTGRES_USER:-myuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-brokerage_data}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # Waits for PostgreSQL to be ready before starting dependent services
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U myuser -d brokerage_data"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -24,10 +25,11 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://myuser:db_pass_2026@db:5432/brokerage_data}
-      INPUT_DIR: ${INPUT_DIR:-/app/data/input}
-      TRADE_FILE_GLOB: ${TRADE_FILE_GLOB:-trades_*.csv}
-      VALID_SIDES: ${VALID_SIDES:-BUY,SELL}
+      POSTGRES_USER: ${POSTGRES_USER:-myuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-brokerage_data}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
     volumes:
       - ./data/input:/app/data/input:ro
     # Exits 0 after completing — restart: "no" is intentional for on-demand use
@@ -42,11 +44,13 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ./data/input:/app/data/input:ro
+      - ./data/input:/app/data/input:ro #Read-Only
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/app
     # Uses `docker run` against the already-built etl image so we do not
     # duplicate orchestration logic inside the container.
-    # Change `*/5` to any cron expression you need.
+    # crond is Daemon (Background Process) that runs the scheduled tasks,
+    # and keep it in foreground mode with `-f` to prevent the container from exiting.
     command: >
       sh -c "
         apk add --no-cache docker-cli &&
@@ -61,8 +65,8 @@ services:
     container_name: brokerage_pgadmin
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@local.dev
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@local.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin_local_dev}
     ports:
       - "5050:80"
     depends_on:

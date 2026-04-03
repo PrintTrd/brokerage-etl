@@ -135,7 +135,10 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+# Ignore all .env files
+.env*
+# BUT do not ignore the example template
+!.env.example
 .envrc
 .venv
 env/
