@@ -14,19 +14,23 @@ and reporting.
 ```
 brokerage-etl/
 ├── data/
-│   └── input/                      # Drop CSV files here
+│   └── input/                    # Drop CSV files here
 │       ├── clients.csv
 │       ├── instruments.csv
 │       ├── trades_2026-03-09.csv
-│       └── trades_YYYY-MM-DD.csv   # CSV Pattern (globbed by ETL)
+│       └── trades_YYYY-MM-DD.csv # CSV Pattern (globbed by ETL)
 ├── src/
-│   ├── config.py                   # Configuration
+│   ├── config.py
 │   ├── database.py
-│   └── etl.py                      # Full ETL pipeline
+│   └── etl.py                    # Full ETL pipeline
+├── .env.example                  # start script will copy to create env file
 ├── docker-compose.yml
 ├── Dockerfile
 ├── README.md
-└── requirements.txt
+├── requirements.txt
+├── scheduler.sh                  # For Periodic (Automatic) Execution
+├── start_mac.sh                  # Set env for Mac/Linux
+└── start_window.bat              # Set env for Windows
 ```
 
 
@@ -118,6 +122,7 @@ docker compose exec db psql -U myuser -d brokerage_data
 # Or query directly without interactive shell
 docker compose exec db psql -U myuser -d brokerage_data -c "SELECT COUNT(*) FROM clients;"
 ```
+Or see in pgAdmin
 
 ### Useful verification queries
 
