@@ -34,43 +34,55 @@ brokerage-etl/
 
 - Docker Desktop (or Docker Engine + Compose v2)
 - No local Python installation required
->*(If you don't have Docker, you can run this locally using Python 3.10+ by installing `requirements.txt` and setting the `DATABASE_URL` environment variable).*
 
 ## How to Start Everything
 For ease of review, this project runs **out-of-the-box** with safe default credentials. No configuration required! See [Configuration & Security](#configuration--security) for details.
 
+1. Clone and enter the repository
 ```bash
-# 1. Clone and enter the repository
 git clone https://github.com/PrintTrd/brokerage-etl.git
 cd brokerage-etl
+```
 
-# 2. (Optional) Configure environment
-cp .env.example .env
-# Edit .env with your desired PostgreSQL and pgAdmin passwords
+2. Configure environment
 
-# 3. Start Docker
-# Mac/Windows: Open Docker Desktop and wait for the engine to show a green "Running" status
-# Linux (Docker Engine): Ensure the Docker daemon is active (e.g., sudo systemctl start docker)
+For **Mac / Linux**: run
+```bash
+chmod +x start_mac.sh
+./start_mac.sh
+```
+For **Window**: double click `start_window.bat` in the folder or run
+```powershell
+  .\start_window.bat
+```
+>(Optional) Edit .env with your desired PostgreSQL and pgAdmin passwords
 
-# 4. Build the ETL image and start the database
-docker compose up -d db
+3. Start Docker
 
-# 5. Wait for Postgres to be healthy (usually ~5 s), then run the ETL once
-docker compose run --build --rm etl
+**Mac / Windows**: Open Docker Desktop and wait for the engine to show a green "Running" status
 
-# 6. Connect to Postgres, then can run queries
-docker compose exec db psql -U myuser -d brokerage_data
+**Linux** (Docker Engine): Ensure the Docker daemon is active (e.g., sudo systemctl start docker)
 
-# 7. (Optional) Start the periodic scheduler and pgAdmin
-docker compose up -d scheduler pgadmin
+4. Build the ETL image and start the database and pgadmin
+```bash
+docker compose up -d db pgadmin
 ```
 This starts:
-- **PostgreSQL** (port 5432) – stores cleaned data
-- **Scheduler** – runs ETL every 5 minutes
-- **pgAdmin** (port 5050) – optional UI to query the database
-Docker:
+- **PostgreSQL** – stores cleaned data
+- **pgAdmin** – optional UI to query the database
+>pgAdmin UI at http://localhost:5050
+
+5. Wait for Postgres to be healthy (~5 s), then run the ETL once
+```bash
+docker compose run --build --rm etl
+```
 - `--build`: ensures the container uses the latest version of the code (optional)
 - `--rm`: cleans up the container after the job finishes
+
+6. Connect to Postgres, then can run queries
+```bash
+docker compose exec db psql -U myuser -d brokerage_data -c "SELECT trade_id, rejection_reason FROM rejected_trades LIMIT 5;"
+```
 
 ## How to Trigger a Run
 
@@ -86,46 +98,46 @@ The pipeline is **idempotent** — re-running with the same file produces the sa
 
 ### Periodic (Automatic) Execution
 
-The scheduler service automatically runs the ETL every 5 minutes:
-
+The scheduler service automatically runs the ETL every 2 minutes:
+>To change the schedule, edit `docker-compose.yml` and modify the cron expression (`*/2 * * * *`) to your needs.
 
 ```bash
-# Already started with `docker compose up -d`
-# Monitor it with:
+docker compose up -d scheduler
+# Monitor the Scheduler (watch it trigger every 2 minutes)
 docker compose logs -f scheduler
 ```
-
-To change the schedule, edit `docker-compose.yml` and modify the cron expression (`*/5 * * * *`) to your needs.
-
 
 ## How to Confirm Results
 
 ### Verify Results
 
 ```bash
-# Check scheduler logs
-docker compose logs scheduler
-
 # Connect to Postgres and run queries
 docker compose exec db psql -U myuser -d brokerage_data
 
 # Or query directly without interactive shell
 docker compose exec db psql -U myuser -d brokerage_data -c "SELECT COUNT(*) FROM clients;"
-
-# Or open pgAdmin UI at http://localhost:5050 (admin@local.dev / admin_local_dev)
 ```
 
 ### Useful verification queries
 
 ```sql
 -- Row counts per table
-SELECT 'clients'        AS tbl, COUNT(*) FROM clients
+SELECT 'clients' AS tbl,  COUNT(*) FROM clients
 UNION ALL
-SELECT 'instruments',            COUNT(*) FROM instruments
+SELECT 'instruments',     COUNT(*) FROM instruments
 UNION ALL
-SELECT 'trades',                 COUNT(*) FROM trades
+SELECT 'trades',          COUNT(*) FROM trades
 UNION ALL
-SELECT 'rejected_trades',        COUNT(*) FROM rejected_trades;
+SELECT 'rejected_trades', COUNT(*) FROM rejected_trades;
+
+       tbl       | count 
+-----------------+-------
+ clients         |    15
+ instruments     |    20
+ trades          |    41
+ rejected_trades |     7
+(4 rows)
 
 -- Rejected rows with reasons (data governance audit)
 SELECT trade_id, rejection_reason, source_file, rejected_at
