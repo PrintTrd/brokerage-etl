@@ -1,5 +1,5 @@
 """
-etl.py — Brokerage Data Pipeline  (Polars edition)
+Brokerage Data Pipeline  (Polars + SQLAlchemy)
 Cleans and loads clients, instruments, and daily trade files into PostgreSQL.
 
 Cleaning steps applied to trades:
@@ -15,13 +15,14 @@ Cleaning steps applied to trades:
 import glob
 import json
 import logging
-import os
 import sys
-import time
 from pathlib import Path
 
 import polars as pl
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from .database import get_engine, create_schema
+from .config import settings
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -30,93 +31,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 log = logging.getLogger(__name__)
-
-# ── Configuration ──────────────────────────────────────────────────────────────
-from src.config import settings
-
-# Derived from environment (or defaults in config.py)
-DATABASE_URL = settings.DATABASE_URL
-INPUT_DIR = settings.INPUT_DIR
-TRADE_FILE_GLOB = settings.TRADE_FILE_GLOB
-VALID_SIDES = settings.VALID_SIDES
-CSV_OPTS = settings.CSV_OPTS
-
-
-# ── Database helpers ───────────────────────────────────────────────────────────
-def get_engine(database_url: str = DATABASE_URL, retries: int = 10, delay: int = 3):
-    """
-    Return a SQLAlchemy engine, retrying on connection failure.
-    Handles the Docker startup race between the app and the DB containers.
-    """
-    last_exc = None
-    for attempt in range(1, retries + 1):
-        try:
-            engine = create_engine(database_url, pool_pre_ping=True)
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            log.info("Database connection established.")
-            return engine
-        except Exception as exc:
-            last_exc = exc
-            log.warning(
-                "DB not ready (attempt %d/%d): %s — retrying in %ds…",
-                attempt,
-                retries,
-                exc,
-                delay,
-            )
-            time.sleep(delay)
-    raise RuntimeError(
-        f"Could not connect to the database after {retries} attempts"
-    ) from last_exc
-
-
-def create_schema(engine) -> None:
-    """Create tables if they do not already exist (idempotent)."""
-    ddl = """
-    CREATE TABLE IF NOT EXISTS clients (
-        client_id   VARCHAR(20)  PRIMARY KEY,
-        client_name VARCHAR(120),
-        country     VARCHAR(10),
-        kyc_status  VARCHAR(20),
-        created_at  DATE
-    );
-
-    CREATE TABLE IF NOT EXISTS instruments (
-        instrument_id VARCHAR(20) PRIMARY KEY,
-        symbol        VARCHAR(20),
-        asset_class   VARCHAR(30),
-        currency      VARCHAR(10),
-        exchange      VARCHAR(30)
-    );
-
-    CREATE TABLE IF NOT EXISTS trades (
-        trade_id      VARCHAR(20)  PRIMARY KEY,
-        trade_time    TIMESTAMPTZ,
-        client_id     VARCHAR(20)  REFERENCES clients(client_id),
-        instrument_id VARCHAR(20)  REFERENCES instruments(instrument_id),
-        side          VARCHAR(4),
-        quantity      NUMERIC(20, 8),
-        price         NUMERIC(20, 8),
-        fees          NUMERIC(20, 8),
-        status        VARCHAR(20),
-        source_file   VARCHAR(120),
-        loaded_at     TIMESTAMPTZ  DEFAULT NOW()
-    );
-
-    -- Audit / governance table for rows that failed validation
-    CREATE TABLE IF NOT EXISTS rejected_trades (
-        id               SERIAL PRIMARY KEY,
-        trade_id         VARCHAR(20),
-        rejection_reason VARCHAR(200),
-        raw_data         JSONB,
-        source_file      VARCHAR(120),
-        rejected_at      TIMESTAMPTZ  DEFAULT NOW()
-    );
-    """
-    with engine.begin() as conn:
-        conn.execute(text(ddl))
-    log.info("Schema ready.")
 
 
 # ── Cleaning helpers ───────────────────────────────────────────────────────────
@@ -180,6 +94,7 @@ def clean_instruments(df: pl.DataFrame) -> pl.DataFrame:
             pl.col("currency").str.to_uppercase(),
         ]
     )
+    # Keep last record if the same instrument_id appears more than once
     df = df.unique(subset=["instrument_id"], keep="last")
     log.info("Instruments clean: %d rows", len(df))
     return df
@@ -233,12 +148,12 @@ def clean_trades(
     # Rows with at least one non-null reason column are rejected.
     # concat_str(..., ignore_nulls=True) joins all fired reasons into one
     # human-readable string ("invalid_side; unknown_client_id", etc.).
-    #
+
     _REASON_COLS = ["_r_side", "_r_price", "_r_qty", "_r_client", "_r_instr"]
 
     df = df.with_columns(
         [
-            pl.when(~pl.col("side").is_in(VALID_SIDES))
+            pl.when(~pl.col("side").is_in(settings.VALID_SIDES))
             .then(pl.lit("invalid_side"))
             .otherwise(None)
             .alias("_r_side"),
@@ -322,6 +237,7 @@ def clean_trades(
     clean = df.filter(~is_rejected).drop(_REASON_COLS + ["_rejection_reason"])
 
     # ── 8. Deduplication — last trade_time per trade_id wins ──────────────
+    # Duplicate trade_ids can stem from amended updates, keep the latest timestamped record.
     dupe_ids = (
         clean.filter(pl.col("trade_id").is_duplicated())["trade_id"].unique().to_list()
     )
@@ -425,16 +341,18 @@ def run(engine) -> None:
     create_schema(engine)
 
     # ── Step 2: Load & clean master data ─────────────────────────────────
-    clients_path = INPUT_DIR / "clients.csv"
-    instruments_path = INPUT_DIR / "instruments.csv"
+    clients_path = settings.INPUT_DIR / "clients.csv"
+    instruments_path = settings.INPUT_DIR / "instruments.csv"
 
     if not clients_path.exists():
         raise FileNotFoundError(f"Missing master file: {clients_path}")
     if not instruments_path.exists():
         raise FileNotFoundError(f"Missing master file: {instruments_path}")
 
-    clients_df = clean_clients(pl.read_csv(clients_path, **CSV_OPTS))
-    instruments_df = clean_instruments(pl.read_csv(instruments_path, **CSV_OPTS))
+    clients_df = clean_clients(pl.read_csv(clients_path, **settings.CSV_OPTS))
+    instruments_df = clean_instruments(
+        pl.read_csv(instruments_path, **settings.CSV_OPTS)
+    )
 
     upsert_master(clients_df, "clients", "client_id", engine)
     upsert_master(instruments_df, "instruments", "instrument_id", engine)
@@ -443,17 +361,19 @@ def run(engine) -> None:
     valid_instrument_ids = set(instruments_df["instrument_id"].to_list())
 
     # ── Step 3: Discover and process all trade files ──────────────────────
-    trade_files = sorted(glob.glob(str(INPUT_DIR / TRADE_FILE_GLOB)))
+    trade_files = sorted(glob.glob(str(settings.INPUT_DIR / settings.TRADE_FILE_GLOB)))
     if not trade_files:
         log.warning(
-            "No trade files matching '%s' found in %s", TRADE_FILE_GLOB, INPUT_DIR
+            "No trade files matching '%s' found in %s",
+            settings.TRADE_FILE_GLOB,
+            settings.INPUT_DIR,
         )
         return
 
     for path in trade_files:
         source_file = Path(path).name
         log.info("Processing trade file: %s", source_file)
-        raw_df = pl.read_csv(path, **CSV_OPTS)
+        raw_df = pl.read_csv(path, **settings.CSV_OPTS)
         clean_df, rejected_df = clean_trades(
             raw_df, valid_client_ids, valid_instrument_ids, source_file
         )
