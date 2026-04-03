@@ -4,7 +4,7 @@ A containerised data pipeline that ingests daily brokerage CSV drops, applies
 data quality rules, and loads clean data into PostgreSQL ready for analytics
 and reporting.
 
----
+
 
 ## Project Structure
 
@@ -14,9 +14,12 @@ brokerage-etl/
 │   └── input/                      # Drop CSV files here
 │       ├── clients.csv
 │       ├── instruments.csv
-│       ├── trades_2026-03-09.csv   # Pattern: trades_YYYY-MM-DD.csv
-│       └── trades_2026-04-02.csv
+│       ├── trades_2026-03-09.csv
+│       ├── trades_2026-04-02.csv   # Include these files for test
+│       └── trades_2026-XX-XX.csv   # Pattern: trades_YYYY-MM-DD.csv (globbed by ETL)
 ├── src/
+│   ├── config.py                   # Configuration
+│   ├── database.py
 │   └── etl.py                      # Full ETL pipeline
 ├── docker-compose.yml
 ├── Dockerfile
@@ -24,68 +27,88 @@ brokerage-etl/
 └── README.md
 ```
 
----
 
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine + Compose v2)
 - No local Python installation required
 
----
 
 ## How to Start Everything
+For ease of review, this project runs **out-of-the-box** with safe default credentials. No configuration required! See [Configuration & Security](#configuration--security) for details.
 
 ```bash
-# 1. Clone / copy this repo, then enter the directory
+# 1. Clone and enter the repository
+git clone https://github.com/PrintTrd/brokerage-etl.git
 cd brokerage-etl
 
-# 2. Build the ETL image and start the database
+# 2. (Optional) Configure environment
+cp .env.example .env
+# Edit .env with your desired PostgreSQL and pgAdmin passwords
+
+# 3. Start Docker
+# Mac/Windows: Open Docker Desktop and wait for the engine to show a green "Running" status
+# Linux (Docker Engine): Ensure the Docker daemon is active (e.g., sudo systemctl start docker)
+
+# 4. Build the ETL image and start the database
 docker compose up -d db
 
-# 3. Wait for Postgres to be healthy (usually ~5 s), then run the ETL once
+# 5. Wait for Postgres to be healthy (usually ~5 s), then run the ETL once
 docker compose run --rm etl
 
-# 4. (Optional) Start the periodic scheduler and pgAdmin
+# 6. Connect to Postgres, then can run queries
+docker compose exec db psql -U myuser -d brokerage_data
+
+# 7. (Optional) Start the periodic scheduler and pgAdmin
 docker compose up -d scheduler pgadmin
 ```
-
----
+This starts:
+- **PostgreSQL** (port 5432) – stores cleaned data
+- **Scheduler** – runs ETL every 5 minutes
+- **pgAdmin** (port 5050) – optional UI to query the database
 
 ## How to Trigger a Run
 
-### On-demand
+### On-Demand Execution
 
-Drop a new trade file (e.g. `data/input/trades_2026-03-10.csv`) then run:
+Drop a new trade file (e.g. `data/input/trades_2026-XX-XX.csv`) then run:
 
 ```bash
 docker compose run --rm etl
 ```
 
-The pipeline is **idempotent** — re-running with the same file produces the
-same result (ON CONFLICT DO UPDATE ensures no duplicates).
+The pipeline is **idempotent** — re-running with the same file produces the same result (ON CONFLICT DO UPDATE ensures no duplicates).
 
-### Periodic (automatic)
+### Periodic (Automatic) Execution
 
-Start the `scheduler` service:
+The scheduler service automatically runs the ETL every 5 minutes:
+
 
 ```bash
-docker compose up -d scheduler
+# Already started with `docker compose up -d`
+# Monitor it with:
+docker compose logs -f scheduler
 ```
 
-It runs the ETL every 5 minutes via cron. Change the schedule inside
-`docker-compose.yml` (`*/5 * * * *`) to any cron expression you need.
+To change the schedule, edit `docker-compose.yml` and modify the cron expression (`*/5 * * * *`) to your needs.
 
----
 
 ## How to Confirm Results
 
-Connect to Postgres:
+### Verify Results
 
 ```bash
-docker compose exec db psql -U myuser -d brokerage_data
-```
+# Check scheduler logs
+docker compose logs scheduler
 
-Or open pgAdmin at **http://localhost:5050** (For the purpose of this technical assessment, default credentials are provided in the docker-compose and config files to ensure a seamless 'plug-and-play' experience for the reviewer. In a production environment, these would be managed via Secret Management Tools and never committed to version control.)
+# Connect to Postgres and run queries
+docker compose exec db psql -U myuser -d brokerage_data
+
+# Or query directly without interactive shell
+docker compose exec db psql -U myuser -d brokerage_data -c "SELECT COUNT(*) FROM clients;"
+
+# Or open pgAdmin UI at http://localhost:5050 (admin@local.dev / admin_local_dev)
+```
 
 ### Useful verification queries
 
@@ -155,6 +178,12 @@ ORDER  BY c.client_name, t.side;
 ```
 
 ---
+### Cleanup
+
+```bash
+# Stop all services and remove volumes
+docker compose down -v
+```
 
 ## Data Cleaning Rules Applied
 
@@ -176,36 +205,41 @@ Rejected rows (with reasons) are written to `rejected_trades` for audit.
 
 ## Design Decisions & Trade-offs
 
-**Upsert over append** — Both master data and trades use `INSERT … ON CONFLICT
-DO UPDATE` rather than `to_sql(if_exists='append')`. This makes every run
-fully idempotent: dropping the same file twice is safe and produces the same
-final state.
+### Configuration & Security
 
-**Late-update semantics for duplicates** — When `trade_id` appears more than
-once (e.g. an amended booking arriving after the original), the record with the
-latest `trade_time` wins. The earlier copy is silently discarded (not flagged
-as rejected, since it is a legitimate amendment pattern).
+**Dynamic Settings via Environment Variables** — The application uses a centralized `Settings` class
 
-**Master data loaded first** — `clients` and `instruments` are upserted before
-trade processing so foreign-key checks work correctly even on a cold database.
+**Security Trade-off (Ease vs. Safety)** — This project prioritizes reviewer convenience by including hardcoded default credentials (`dev_password_local_only` for PostgreSQL, `admin_local_dev` for pgAdmin). This enables immediate `docker compose up` execution without pre-configuration steps. However, in a production environment, credentials must be managed via dedicated Secret Management Tools. These should never be hardcoded or committed to version control.
 
-**Rejected rows to a table, not a file** — Storing rejections in
-`rejected_trades` keeps the audit trail queryable alongside production data and
-survives container restarts.
+**Environment Isolation** — PostgreSQL and the application are isolated via Docker Compose network. The database is reachable only from within the container network (using the `db` hostname), preventing accidental public exposure. External access is strictly controlled via mapped ports.
 
-**Connection retry loop** — `get_engine()` retries up to 10 times with a 3 s
-delay. This eliminates the "app starts before DB is ready" race condition in
-Docker without relying on `wait-for-it` scripts or sleep hacks.
+### Data Pipeline Robustness
 
-**Scheduler via Alpine cron + Docker socket** — A lightweight Alpine container
-runs `crond` and re-triggers `docker compose run --rm etl` on a schedule. The
-tradeoff is that it requires the Docker socket to be mounted. Alternatively,
-replace this service with an Airflow DAG, a Kubernetes CronJob, or a simple
-host-level cron.
+**Connection Retry Logic** — The `get_engine()` function implements retry logic (up to 10 attempts with 3-second delays) to handle the race condition where the application container starts before PostgreSQL is fully initialized. This eliminates the need for external `wait-for-it` scripts while gracefully handling temporary connection failures.
 
-**`fees` may be NULL** — Some trade records arrive without a fees value
-(e.g. CANCELLED trades). `fees` is kept nullable in the schema; downstream
-aggregations should use `COALESCE(fees, 0)`.
+**Validation & Data Integrity** —
+- **Data Consistency**: Trades are normalized (whitespace stripped, case uppercased, numeric formats standardized) to ensure consistency across runs.
+- **Referential Integrity**: Invalid foreign key references (`client_id`, `instrument_id`) are rejected before insertion, ensuring clean, queryable datasets.
+- **Audit Trail**: Rejected rows with detailed rejection reasons are stored in `rejected_trades` table, providing governance and debugging capabilities.
+
+**Idempotent Runs** — Both master data and trades use Upsert `INSERT … ON CONFLICT DO UPDATE` semantics rather than `to_sql(if_exists='append')`. Re-running the ETL with the same input files produces identical final state, making the pipeline safe for periodic execution and recovery from failures.
+
+### Scalability & Future-proofing
+
+**Incremental Processing** — The pipeline uses glob patterns (`trades_*.csv`) to automatically discover and process new trade files added to `data/input/` without code changes. Combined with the scheduler, this enables seamless horizontal scaling of data ingestion.
+
+**Late-update Semantics** — When duplicate `trade_id` values appear (e.g., amended trades), the record with the latest `trade_time` is retained, silently discarding older versions. This legitimate amendment pattern is not flagged as rejection, supporting real-world trading workflows.
+
+**Master Data Precedence** — `clients` and `instruments` are loaded before trades, ensuring foreign key validation works correctly even on a cold database. This design supports various initialization sequences and partial restarts.
+
+**Pluggable Scheduling** — The current implementation uses Alpine cron + Docker socket. This is lightweight but requires socket mounting. For larger deployments, this can be replaced with:
+- Apache Airflow (workflow orchestration)
+- Kubernetes CronJobs (Kubernetes-native scheduling)
+- AWS Lambda or Google Cloud Functions (serverless)
+- Host-level cron with appropriate permissions
+
+**Nullable Fees** — Some trades arrive without fees (e.g., CANCELLED status). The schema keeps `fees` nullable; downstream queries should use `COALESCE(fees, 0)` for aggregations.
+
+**Data Masking Awareness** — `client_name` are treated as sensitive information requiring careful handling in actual production deployments. The pipeline is designed to support future data masking or PII anonymization without structural changes.
 
 ---
-**Data Masking Awareness**: In this project, I treated `client_name` as potentially sensitive information. Although these are mock records, the pipeline is designed to handle such fields with care.
