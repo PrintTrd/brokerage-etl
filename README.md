@@ -140,8 +140,8 @@ SELECT 'rejected_trades', COUNT(*) FROM rejected_trades;
 -----------------+-------
  clients         |    15
  instruments     |    20
- trades          |    41
- rejected_trades |     7
+ trades          |    28
+ rejected_trades |    20
 (4 rows)
 
 -- Rejected rows with reasons (data governance audit)
@@ -150,16 +150,29 @@ FROM   rejected_trades
 ORDER  BY rejected_at DESC;
 
 Example output:
- trade_id |   rejection_reason    |      source_file      |          rejected_at
-----------+-----------------------+-----------------------+-------------------------------
- T0003    | unknown_client_id     | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0005    | invalid_quantity      | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0006    | invalid_side          | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0007    | invalid_price         | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0025    | unknown_instrument_id | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0026    | invalid_quantity      | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
- T0030    | invalid_price         | trades_2026-03-09.csv | 2026-04-02 11:19:27.885178+00
-(7 rows)
+ trade_id |          rejection_reason           |      source_file      |          rejected_at
+----------+-------------------------------------+-----------------------+-------------------------------
+ T0003    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0004    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0005    | invalid_quantity; unknown_client_id | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0006    | invalid_side                        | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0007    | invalid_price; unknown_client_id    | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0012    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0014    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0017    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0022    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0023    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0025    | unknown_instrument_id               | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0026    | invalid_quantity; unknown_client_id | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0028    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0030    | invalid_price                       | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0031    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0036    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0037    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0041    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0043    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+ T0046    | unknown_client_id                   | trades_2026-03-09.csv | 2026-04-20 02:14:34.561563+00
+(20 rows)
 
 -- Clean trades with full client and instrument context
 SELECT t.trade_id,

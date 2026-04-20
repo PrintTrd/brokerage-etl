@@ -3,13 +3,16 @@ Brokerage Data Pipeline  (Polars + SQLAlchemy)
 Cleans and loads clients, instruments, and daily trade files into PostgreSQL.
 
 Cleaning steps applied to trades:
-  1. Whitespace stripping + case normalisation
-  2. Numeric parsing  (comma-separated strings → Float64)
-  3. Side validation  (must be BUY | SELL)
-  4. Price / quantity validation  (must be > 0 and not null)
-  5. Referential integrity  (client_id and instrument_id must exist in master)
-  6. Deduplication  (last record per trade_id wins — "late update" semantics)
-  7. Rejected rows are written to the `rejected_trades` audit table
+  1. Normalise strings (whitespace stripping + case normalisation)
+  2. Numeric parsing  (comma-separated strings → cast to Float64)
+  3. Parse timestamps (ISO-8601 to UTC)
+  4. Tag source file (for idempotency and audit trail)
+  5. Rejection-reason columns (each rule adds a nullable reason string)
+  Side validation  (must be BUY | SELL)
+  Price / quantity validation  (must be > 0 and not null)
+  6. Build audit rows for rejected records (written to `rejected_trades`)
+  7. Isolate clean rows (those with no rejection reasons)
+  8. Deduplication (last trade_time per trade_id wins — "late update" semantics)
 """
 
 import glob
@@ -43,6 +46,11 @@ def strip_strings(df: pl.DataFrame) -> pl.DataFrame:
 def parse_numeric_col(col: str) -> pl.Expr:
     """
     Remove comma thousand-separators then cast to Float64.
+    While Decimal is ideal for financial data, we use Float64 here because:
+    1. Polars Decimal support is experimental and has limited compatibility with SQLAlchemy inserts.
+    2. No financial calculations (e.g., price * quantity) are done in Python;
+       data is safely passed to PostgreSQL where it is stored exactly as NUMERIC(20, 8).
+
     Unparseable values (including bare 'NaN' strings) become null.
     e.g. "1,950" -> 1950.0,  "NaN" -> null
     """
@@ -102,8 +110,8 @@ def clean_instruments(df: pl.DataFrame) -> pl.DataFrame:
 
 def clean_trades(
     df: pl.DataFrame,
-    valid_client_ids: set,
-    valid_instrument_ids: set,
+    clients_df: pl.DataFrame,
+    instruments_df: pl.DataFrame,
     source_file: str,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
@@ -114,6 +122,12 @@ def clean_trades(
         rejected_df holds raw rejected rows plus a rejection_reason string.
     """
     raw = df  # keep untouched original for the audit trail
+
+    known_client_ids = clients_df["client_id"].to_list()
+    kyc_approved_client_ids = clients_df.filter(pl.col("kyc_status") == "APPROVED")[
+        "client_id"
+    ].to_list()
+    known_instrument_ids = instruments_df["instrument_id"].to_list()
 
     # ── 1. Normalise strings ───────────────────────────────────────────────
     df = strip_strings(df)
@@ -143,17 +157,24 @@ def clean_trades(
     df = df.with_columns(pl.lit(source_file).alias("source_file"))
 
     # ── 5. Build rejection-reason columns (one per rule) ──────────────────
-    #
     # Each rule adds a nullable String column: value = reason text | null.
     # Rows with at least one non-null reason column are rejected.
     # concat_str(..., ignore_nulls=True) joins all fired reasons into one
     # human-readable string ("invalid_side; unknown_client_id", etc.)
 
-    _REASON_COLS = ["_r_side", "_r_price", "_r_qty", "_r_client", "_r_instr"]
+    _REASON_COLS = [
+        "_r_side",
+        "_r_price",
+        "_r_qty",
+        "_r_client_unknown",
+        "_r_client_kyc",
+        "_r_instr",
+        "_r_status",
+    ]
 
     df = df.with_columns(
         [
-            pl.when(~pl.col("side").is_in(settings.VALID_SIDES))
+            pl.when(~pl.col("side").is_in(settings.VALID_SIDES))  # "BUY", "SELL"
             .then(pl.lit("invalid_side"))
             .otherwise(None)
             .alias("_r_side"),
@@ -165,14 +186,25 @@ def clean_trades(
             .then(pl.lit("invalid_quantity"))
             .otherwise(None)
             .alias("_r_qty"),
-            pl.when(~pl.col("client_id").is_in(list(valid_client_ids)))
+            pl.when(~pl.col("client_id").is_in(list(known_client_ids)))
             .then(pl.lit("unknown_client_id"))
             .otherwise(None)
-            .alias("_r_client"),
-            pl.when(~pl.col("instrument_id").is_in(list(valid_instrument_ids)))
+            .alias("_r_client_unknown"),
+            pl.when(
+                pl.col("client_id").is_in(known_client_ids)
+                & ~pl.col("client_id").is_in(kyc_approved_client_ids)
+            )
+            .then(pl.lit("client_kyc_not_approved"))
+            .otherwise(None)
+            .alias("_r_client_kyc"),
+            pl.when(~pl.col("instrument_id").is_in(list(known_instrument_ids)))
             .then(pl.lit("unknown_instrument_id"))
             .otherwise(None)
             .alias("_r_instr"),
+            pl.when(pl.col("status").is_null())
+            .then(pl.lit("invalid_status"))
+            .otherwise(None)
+            .alias("_r_status"),
         ]
     )
 
@@ -346,7 +378,7 @@ def get_processed_files(engine) -> set:
 def run(engine) -> None:
     # ── Step 1: Schema ────────────────────────────────────────────────────
     create_schema(engine)
-
+  
     # ── Step 2: Load & clean master data ─────────────────────────────────
     clients_path = settings.INPUT_DIR / "clients.csv"
     instruments_path = settings.INPUT_DIR / "instruments.csv"
@@ -363,9 +395,6 @@ def run(engine) -> None:
 
     upsert_master(clients_df, "clients", "client_id", engine)
     upsert_master(instruments_df, "instruments", "instrument_id", engine)
-
-    valid_client_ids = set(clients_df["client_id"].to_list())
-    valid_instrument_ids = set(instruments_df["instrument_id"].to_list())
 
     # ── Step 3: Discover and process all trade files ──────────────────────
     trade_files = sorted(glob.glob(str(settings.INPUT_DIR / settings.TRADE_FILE_GLOB)))
@@ -387,7 +416,7 @@ def run(engine) -> None:
         log.info("Processing trade file: %s", source_file)
         raw_df = pl.read_csv(path, **settings.CSV_OPTS)
         clean_df, rejected_df = clean_trades(
-            raw_df, valid_client_ids, valid_instrument_ids, source_file
+            raw_df, clients_df, instruments_df, source_file
         )
         upsert_trades(clean_df, engine)
         insert_rejected(rejected_df, engine)
