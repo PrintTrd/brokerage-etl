@@ -71,7 +71,7 @@ services:
 
   # ── pgAdmin (optional, visual query tool) ────────────────────────────────
   pgadmin:
-    image: dpage/pgadmin4:8
+    image: dpage/pgadmin4:9.14 
     container_name: brokerage_pgadmin
     restart: unless-stopped
     environment:
@@ -81,6 +81,8 @@ services:
       - "5050:80"
     depends_on:
       - db
+    networks:
+      - etl_network
 
 volumes:
   pgdata:
@@ -89,3 +91,4 @@ networks:
   etl_network:
     name: shared_etl_network
     driver: bridge
+    external: true
